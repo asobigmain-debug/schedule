@@ -458,11 +458,13 @@ window.onload = function() {
 async function gas(body) {
   if (!GAS_URL) { toast('URLが未設定です'); return null; }
   try {
-    const r = await fetch(GAS_URL, {
-      method:'POST', redirect:'follow',
-      headers:{'Content-Type':'text/plain'},
-      body: JSON.stringify(body)
+    // GETパラメータで渡す（iOS SafariのCORSエラーを回避）
+    const params = new URLSearchParams();
+    Object.entries(body).forEach(([k,v]) => {
+      params.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
     });
+    const url = GAS_URL + '?' + params.toString();
+    const r = await fetch(url, { redirect:'follow' });
     return await r.json();
   } catch(e) { toast('通信エラー: '+e.message); return null; }
 }
