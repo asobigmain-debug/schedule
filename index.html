@@ -433,7 +433,7 @@ async function sendAll(){
   toast(ok?'送信しました ✓':'一部失敗しました');
 }
 
-function openPlan(){renderPlanSel();document.getElementById('plan-modal').classList.remove('hidden');}
+function openPlan(){renderPlanSel();document.getElementById('plan-modal').classList.remove('hidden');document.getElementById('plan-body').innerHTML='<div style="margin-bottom:10px"><button onclick="generateAndSaveAll()" style="width:100%;padding:13px;background:linear-gradient(90deg,#1e8fb5,#2aadda);color:#fff;border:none;border-radius:8px;font-size:.9rem;font-weight:700;cursor:pointer;font-family:Noto Sans JP,sans-serif;letter-spacing:.05em;box-shadow:0 3px 10px rgba(30,143,181,.3)">✦ 全公演まとめて予定を組む</button><div style="text-align:center;font-size:.68rem;color:#4a6572;margin-top:4px">○優先・×除外・△は人数不足時のみ（要確認）</div></div><div style="text-align:center;color:#4a6572;font-size:.78rem;margin-top:10px">または下から公演を選んで個別に確認</div>';}
 function closePlan(){document.getElementById('plan-modal').classList.add('hidden');}
 
 function renderPlanSel(){
@@ -460,57 +460,183 @@ function loadPlan(){
   document.getElementById('plan-save').style.display='block';
 }
 
-function autoPlan(){
+// ===== 全期間一括割り付け =====
+// countMap: { name: 今期間の出演確定回数 } を管理しながら全公演を順番に処理
+function generateAllPlans(){
   const cfg=D.config||{};
-  const reps=D.replies.filter(r=>r.koenId===planKoenId&&(r.status==='ok'||r.status==='delta'));
-  if(!reps.length){document.getElementById('plan-body').innerHTML='<div class="empty">出演可能な回答がありません</div>';return;}
-  const minP=parseInt(cfg.minP)||3,maxP=parseInt(cfg.maxP)||5;
-  const cm=cfg.countMode||'equal',gm=cfg.geishuMode||'equal';
-  const cntMap={};
-  D.replies.filter(r=>r.status==='ok').forEach(r=>{cntMap[r.name]=(cntMap[r.name]||0)+1;});
-  let pool=reps.slice();
-  if(cm==='equal')pool.sort((a,b)=>(cntMap[a.name]||0)-(cntMap[b.name]||0));
-  const cnt=Math.min(maxP,Math.max(minP,pool.length));
-  let cast=[];
-  if(gm==='equal'){
-    const byG={};
-    pool.forEach(p=>{const g=p.geishu||'その他';(byG[g]=byG[g]||[]).push(p);});
-    const keys=Object.keys(byG);
-    for(let ki=0;cast.length<cnt&&ki<cnt+5;ki++)
-      for(let i=0;i<keys.length&&cast.length<cnt;i++){
-        const a=(byG[keys[(ki+i)%keys.length]]||[]).filter(p=>!cast.includes(p));
-        if(a.length)cast.push(a[0]);
+  const minP=parseInt(cfg.minP)||3;
+  const maxP=parseInt(cfg.maxP)||5;
+  const gm=cfg.geishuMode||'equal';
+  const nakairi=cfg.nakairi||'middle';
+
+  // 期間内のアーカイブ済みでない公演
+  const koens=D.koens.filter(k=>!k.archived);
+  if(!koens.length){toast('対象の公演がありません');return null;}
+
+  // 今期間の出演カウント（○で既に保存済みのものを初期値に）
+  const countMap={};
+  // 全員初期化
+  const allNames=new Set(D.replies.map(r=>r.name));
+  allNames.forEach(n=>{countMap[n]=0;});
+
+  const plans=[];
+
+  koens.forEach(function(koen){
+    // この公演の回答
+    const okReps  =D.replies.filter(r=>r.koenId===koen.id&&r.status==='ok');
+    const dtReps  =D.replies.filter(r=>r.koenId===koen.id&&r.status==='delta');
+    // × は絶対除外
+
+    // ○を出演回数が少ない順にソート
+    let okPool=okReps.slice().sort((a,b)=>(countMap[a.name]||0)-(countMap[b.name]||0));
+
+    const cnt=Math.min(maxP,Math.max(minP,okPool.length+dtReps.length));
+    let cast=[];
+    let usedDelta=[];
+
+    // 芸種バランスを考慮して○から選ぶ
+    if(gm==='equal'){
+      const byG={};
+      okPool.forEach(p=>{const g=p.geishu||'その他';(byG[g]=byG[g]||[]).push(p);});
+      const keys=Object.keys(byG);
+      let ki=0;
+      while(cast.length<Math.min(cnt,okPool.length)&&ki<cnt+5){
+        for(let i=0;i<keys.length&&cast.length<Math.min(cnt,okPool.length);i++){
+          const a=(byG[keys[(ki+i)%keys.length]]||[]).filter(p=>!cast.includes(p));
+          if(a.length)cast.push(a[0]);
+        }
+        ki++;
       }
-    pool.forEach(p=>{if(cast.length<cnt&&!cast.includes(p))cast.push(p);});
-  }else if(gm==='kodan'){
-    cast=pool.filter(p=>p.geishu==='講談').concat(pool.filter(p=>p.geishu!=='講談')).slice(0,cnt);
-  }else{cast=pool.slice(0,cnt);}
-  if(cm==='equal')cast.sort((a,b)=>(cntMap[a.name]||0)-(cntMap[b.name]||0));
-  planCast=cast.map(p=>({name:p.name,geishu:p.geishu||'',neta:''}));
+      okPool.forEach(p=>{if(cast.length<Math.min(cnt,okPool.length)&&!cast.includes(p))cast.push(p);});
+    }else if(gm==='kodan'){
+      const ko=okPool.filter(p=>p.geishu==='講談');
+      const ot=okPool.filter(p=>p.geishu!=='講談');
+      cast=[...ko,...ot].slice(0,Math.min(cnt,okPool.length));
+    }else{
+      cast=okPool.slice(0,Math.min(cnt,okPool.length));
+    }
+
+    // ○だけで人数が足りない場合、△を追加（要確認）
+    if(cast.length<minP&&dtReps.length>0){
+      const need=minP-cast.length;
+      const dtSorted=dtReps.slice().sort((a,b)=>(countMap[a.name]||0)-(countMap[b.name]||0));
+      dtSorted.slice(0,need).forEach(p=>{cast.push(p);usedDelta.push(p.name);});
+    }
+
+    // 出演順：回数少ない順（前座→中堅→トリ）
+    cast.sort((a,b)=>(countMap[a.name]||0)-(countMap[b.name]||0));
+
+    // カウント更新（○確定のみカウント、△は暫定）
+    cast.forEach(p=>{
+      if(!usedDelta.includes(p.name)){
+        countMap[p.name]=(countMap[p.name]||0)+1;
+      }
+    });
+
+    // 仲入り位置
+    const ni=Math.floor(cast.length/2);
+
+    plans.push({
+      koen:koen,
+      cast:cast.map((p,i)=>({
+        order:i+1,
+        name:p.name,
+        geishu:p.geishu||'',
+        neta:'',
+        pending:usedDelta.includes(p.name), // △要確認フラグ
+        nakairiAfter:(nakairi==='middle'&&i===ni-1), // 仲入りタイミング
+      })),
+      countMap:{...countMap},
+    });
+  });
+  return plans;
+}
+
+// 単公演の自動提案（モーダル内）
+function autoPlan(){
+  const allPlans=generateAllPlans();
+  if(!allPlans)return;
+  const plan=allPlans.find(p=>p.koen.id===planKoenId);
+  if(!plan){document.getElementById('plan-body').innerHTML='<div class="empty">この公演の回答がありません</div>';return;}
+  planCast=plan.cast;
   renderPlanBody();
 }
 
 function renderPlanBody(){
-  const ni=Math.floor(planCast.length/2);
   const nakairi=(D.config||{}).nakairi||'middle';
   let html='';
   planCast.forEach((p,i)=>{
-    if(nakairi==='middle'&&i===ni)html+='<div class="nakairi-div">〜 仲入り 〜</div>';
+    // 仲入りは nakairiAfter フラグで判定（なければ中間）
+    const doNakairi=p.nakairiAfter||(nakairi==='middle'&&i===Math.floor(planCast.length/2));
+    if(doNakairi)html+='<div class="nakairi-div">〜 仲入り 〜</div>';
     const role=i===planCast.length-1?'トリ':i===0?'前座':'中堅';
-    html+='<div class="cast-row"><div class="cast-num">'+(i+1)+'</div><div><div class="cast-name">'+p.name+'</div><div class="cast-role">'+role+(p.geishu?' / '+p.geishu:'')+'</div></div><input class="neta" placeholder="演目" value="'+(p.neta||'')+'" onchange="planCast['+i+'].neta=this.value"></div>';
+    const pendingMark=p.pending?'<span style="background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:10px;font-size:.62rem;padding:1px 6px;margin-left:4px">要確認</span>':'';
+    html+='<div class="cast-row"><div class="cast-num" style="'+(p.pending?'background:#e0a800':'')+'">'+(i+1)+'</div><div><div class="cast-name">'+p.name+pendingMark+'</div><div class="cast-role">'+role+(p.geishu?' / '+p.geishu:'')+'</div></div><input class="neta" placeholder="演目" value="'+(p.neta||'')+'" onchange="planCast['+i+'].neta=this.value"></div>';
   });
   document.getElementById('plan-body').innerHTML=html?'<div style="border:1px solid #d0e8f0;border-radius:8px;padding:10px;background:#fff;margin-bottom:8px">'+html+'</div>':'<div class="empty">出演候補がありません</div>';
 }
 
 async function savePlan(){
   if(!planKoenId||!planCast.length){toast('番組が空です');return;}
-  const cast=planCast.map((p,i)=>({order:i+1,name:p.name,geishu:p.geishu,neta:p.neta||''}));
+  const cast=planCast.map((p,i)=>({order:i+1,name:p.name,geishu:p.geishu,neta:p.neta||'',pending:p.pending||false}));
   const r=await gas({action:'saveCast',koenId:planKoenId,cast:JSON.stringify(cast)});
   if(r&&r.ok){
     D.casts=D.casts.filter(c=>c.koenId!==planKoenId);
     cast.forEach((c,i)=>D.casts.push({id:'_'+i,koenId:planKoenId,...c}));
     toast('番組を保存しました');closePlan();renderExp();
   }
+}
+
+// 全公演一括「予定を組む」ボタン
+async function generateAndSaveAll(){
+  const plans=generateAllPlans();
+  if(!plans)return;
+  toast('計算中…');
+  const payload=plans.map(p=>({
+    koenId:p.koen.id,
+    cast:p.cast.map((c,i)=>({order:i+1,name:c.name,geishu:c.geishu,neta:c.neta||'',pending:c.pending||false}))
+  }));
+  const r=await gas({action:'saveBulkCast',plans:JSON.stringify(payload)});
+  if(r&&r.ok){
+    // ローカルのD.castsを更新
+    D.casts=[];
+    payload.forEach(plan=>{
+      plan.cast.forEach((c,i)=>D.casts.push({id:'_'+plan.koenId+'_'+i,koenId:plan.koenId,...c}));
+    });
+    toast('全公演の予定を組みました ✓');
+    closePlan();
+    renderExp();
+    // 結果サマリーを表示
+    showPlanSummary(plans);
+  }
+}
+
+function showPlanSummary(plans){
+  // 全公演の結果をモーダルで表示
+  const nakairi=(D.config||{}).nakairi||'middle';
+  document.getElementById('plan-sel').value='';
+  let html='<div style="margin-bottom:10px;font-size:.78rem;color:#4a6572">全'+plans.length+'公演の予定を組みました。<br>🟡 は △（要確認）の出演者です。</div>';
+  plans.forEach(function(plan){
+    const d=pd(plan.koen.date);
+    const lbl=(d.getMonth()+1)+'/'+d.getDate()+'('+DOW[d.getDay()]+') '+plan.koen.name;
+    html+='<div style="margin-bottom:12px;border:1px solid #d0e8f0;border-radius:8px;overflow:hidden">';
+    html+='<div style="background:#1e8fb5;color:#fff;padding:7px 12px;font-size:.82rem;font-weight:700">'+lbl+'</div>';
+    html+='<div style="padding:8px 10px;background:#fff">';
+    plan.cast.forEach((p,i)=>{
+      const role=i===plan.cast.length-1?'トリ':i===0?'前座':'中堅';
+      const mark=p.pending?'🟡 ':'　';
+      if(p.nakairiAfter)html+='<div style="text-align:center;font-size:.7rem;color:#4a6572;padding:3px;background:#e4f4fb;border-radius:4px;margin:2px 0">〜 仲入り 〜</div>';
+      html+='<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid #f0f8fc;font-size:.82rem">';
+      html+='<span style="color:#1e8fb5;font-weight:700;min-width:18px">'+(i+1)+'.</span>';
+      html+='<span style="font-weight:700">'+mark+p.name+'</span>';
+      html+='<span style="font-size:.65rem;color:#4a6572">'+role+'</span>';
+      html+='</div>';
+    });
+    html+='</div></div>';
+  });
+  document.getElementById('plan-body').innerHTML=html;
+  document.getElementById('plan-save').style.display='none';
+  document.getElementById('plan-sel').innerHTML='<option value="">← 全公演まとめて組みました</option>';
 }
 
 async function bulkAdd(){
@@ -584,7 +710,7 @@ function renderExp(){
     const d=pd(k.date);
     const lbl=(d.getMonth()+1)+'月'+d.getDate()+'日（'+DOW[d.getDay()]+'）';
     const cast=D.casts.filter(c=>c.koenId===k.id).sort((a,b)=>a.order-b.order);
-    const chips=(cast.length?cast.map(c=>'<span class="exp-chip">'+c.name+'</span>'):D.replies.filter(r=>r.koenId===k.id&&r.status==='ok').map(r=>'<span class="exp-chip">'+r.name+'</span>')).join('');
+    const chips=(cast.length?cast.map(c=>'<span class="exp-chip"'+(c.pending?' style="background:#fff3cd;border-color:#ffc107;color:#856404"':'')+'>'+c.name+(c.pending?' ⚠':'')+'</span>'):D.replies.filter(r=>r.koenId===k.id&&r.status==='ok').map(r=>'<span class="exp-chip">'+r.name+'</span>')).join('');
     return '<div class="exp-row"><div class="exp-date">'+lbl+'<br><span style="font-size:.68rem;color:#4a6572;font-weight:400">'+k.name+(k.time?' '+k.time:'')+'</span></div><div class="exp-chips">'+( chips||'<span style="color:#aaa;font-size:.7rem">未定</span>')+'</div></div>';
   }).join('');
 }
