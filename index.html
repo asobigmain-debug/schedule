@@ -706,13 +706,66 @@ function renderExp(){
   if(!targets.length){el.innerHTML='<div class="empty">対象の公演がありません</div>';return;}
   const t=today().split('-');
   const period=months>0?t[0]+'年'+parseInt(t[1])+'月〜'+(parseInt(t[1])+months-1)+'月':'全期間';
-  el.innerHTML='<div class="exp-title">出演予定一覧　'+period+'</div>'+targets.map(k=>{
+  // 上：日程一覧（チラシ風）
+  let html='<div class="exp-title">出演予定一覧　'+period+'</div>';
+  const byMonth={},monthOrder=[];
+  targets.forEach(k=>{
     const d=pd(k.date);
-    const lbl=(d.getMonth()+1)+'月'+d.getDate()+'日（'+DOW[d.getDay()]+'）';
+    const mk=(d.getMonth()+1)+'月';
+    if(!byMonth[mk]){byMonth[mk]=[];monthOrder.push(mk);}
+    byMonth[mk].push(k);
+  });
+  monthOrder.forEach(mk=>{
+    html+='<div style="font-size:.9rem;font-weight:700;color:#1e8fb5;padding:8px 0 3px;border-bottom:1px solid #b3dff0;margin-bottom:2px">'+mk+'</div>';
+    byMonth[mk].forEach(k=>{
+      const d=pd(k.date);
+      const lbl=d.getDate()+'日（'+DOW[d.getDay()]+'）';
+      const cast=D.casts.filter(c=>c.koenId===k.id).sort((a,b)=>a.order-b.order);
+      const people=cast.length
+        ? cast.map(c=>c.pending?'<span style="color:#856404">'+c.name+'⚠</span>':c.name)
+        : D.replies.filter(r=>r.koenId===k.id&&r.status==='ok').map(r=>r.name);
+      html+='<div style="display:flex;gap:10px;padding:5px 0;border-bottom:1px solid #f5f5f5;font-size:.85rem">'
+        +'<div style="min-width:76px;font-weight:700;color:#1a2e38">'+lbl+'</div>'
+        +'<div>'+( people.join('　')||'<span style="color:#aaa">未定</span>')+'</div>'
+        +'</div>';
+    });
+  });
+
+  // 下：人別・出演日まとめ
+  const personDates={};
+  targets.forEach(k=>{
+    const d=pd(k.date);
+    const dlbl=(d.getMonth()+1)+'/'+d.getDate();
     const cast=D.casts.filter(c=>c.koenId===k.id).sort((a,b)=>a.order-b.order);
-    const chips=(cast.length?cast.map(c=>'<span class="exp-chip"'+(c.pending?' style="background:#fff3cd;border-color:#ffc107;color:#856404"':'')+'>'+c.name+(c.pending?' ⚠':'')+'</span>'):D.replies.filter(r=>r.koenId===k.id&&r.status==='ok').map(r=>'<span class="exp-chip">'+r.name+'</span>')).join('');
-    return '<div class="exp-row"><div class="exp-date">'+lbl+'<br><span style="font-size:.68rem;color:#4a6572;font-weight:400">'+k.name+(k.time?' '+k.time:'')+'</span></div><div class="exp-chips">'+( chips||'<span style="color:#aaa;font-size:.7rem">未定</span>')+'</div></div>';
-  }).join('');
+    const people=cast.length
+      ? cast.map(c=>({name:c.name,pending:c.pending,lbl:dlbl}))
+      : D.replies.filter(r=>r.koenId===k.id&&r.status==='ok').map(r=>({name:r.name,pending:false,lbl:dlbl}));
+    people.forEach(p=>{
+      if(!personDates[p.name])personDates[p.name]=[];
+      personDates[p.name].push({lbl:p.lbl,pending:p.pending});
+    });
+  });
+
+  if(Object.keys(personDates).length){
+    html+='<div style="margin-top:14px;padding-top:10px;border-top:2px solid #b3dff0">';
+    html+='<div style="font-size:.82rem;font-weight:700;color:#1e8fb5;margin-bottom:8px">出演日まとめ</div>';
+    Object.entries(personDates)
+      .sort((a,b)=>b[1].length-a[1].length)
+      .forEach(([name,dates])=>{
+        const dateStr=dates.map(d=>d.pending
+          ?'<span style="color:#856404">'+d.lbl+'⚠</span>'
+          :d.lbl
+        ).join('・');
+        html+='<div style="display:flex;align-items:baseline;gap:6px;padding:5px 0;border-bottom:1px solid #f5f5f5;font-size:.82rem">'
+          +'<div style="min-width:70px;font-weight:700">'+name+'</div>'
+          +'<div style="flex:1;color:#1a2e38">'+dateStr+'</div>'
+          +'<div style="color:#1e8fb5;font-weight:700;white-space:nowrap">（'+dates.length+'回）</div>'
+          +'</div>';
+      });
+    html+='</div>';
+  }
+
+  el.innerHTML=html;
 }
 
 async function exportJpg(){
