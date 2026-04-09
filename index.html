@@ -460,142 +460,99 @@ function loadPlan(){
   document.getElementById('plan-save').style.display='block';
 }
 
-// ===== 全期間一括割り付け（均等回数優先・正式版）=====
+// ===== 全期間一括割り付け（希少順・均等版）=====
 function generateAllPlans(){
   const cfg=D.config||{};
   const minP=parseInt(cfg.minP)||3;
-  const maxP=parseInt(cfg.maxP)||5;
-  const gm=cfg.geishuMode||'equal';
   const nakairi=cfg.nakairi||'middle';
 
   const koens=D.koens.filter(k=>!k.archived);
   if(!koens.length){toast('対象の公演がありません');return null;}
 
-  // --- Step1: 各人の出演可能公演リストを作る ---
-  // { name: { ok:[koenId,...], delta:[koenId,...] } }
-  const availability={};
+  // Step1: 各人の出演可能公演セット
+  const avail={};
   koens.forEach(k=>{
     D.replies.filter(r=>r.koenId===k.id).forEach(r=>{
-      if(!availability[r.name])availability[r.name]={ok:[],delta:[],geishu:r.geishu||''};
-      if(r.status==='ok')   availability[r.name].ok.push(k.id);
-      if(r.status==='delta')availability[r.name].delta.push(k.id);
+      if(!avail[r.name])avail[r.name]={ok:new Set(),delta:new Set(),geishu:r.geishu||''};
+      if(r.status==='ok')   avail[r.name].ok.add(k.id);
+      if(r.status==='delta')avail[r.name].delta.add(k.id);
     });
   });
-
-  const names=Object.keys(availability);
+  const names=Object.keys(avail);
   if(!names.length){toast('回答がありません');return null;}
 
-  // --- Step2: 目標回数を計算 ---
-  const totalSlots=koens.length*minP; // 例: 9公演×3人=27枠
-  // 各人の上限（○+△）
-  const upperLimit={};
-  names.forEach(n=>{
-    upperLimit[n]=(availability[n].ok.length)+(availability[n].delta.length);
-  });
-  const totalCapacity=names.reduce((s,n)=>s+upperLimit[n],0);
-  // 目標回数：均等配分（上限を超えない範囲）
-  const baseTarget=totalSlots/names.length; // 例: 4.5
-  const targetMap={};
-  names.forEach(n=>{
-    targetMap[n]=Math.min(upperLimit[n], Math.round(baseTarget));
-  });
-  // 合計が totalSlots になるよう調整
-  let assigned=names.reduce((s,n)=>s+targetMap[n],0);
-  // 不足分は上限に余裕がある人に追加
-  const sortedBySlack=names.slice().sort((a,b)=>
-    (upperLimit[b]-targetMap[b])-(upperLimit[a]-targetMap[a])
-  );
-  let idx2=0;
-  while(assigned<totalSlots&&idx2<sortedBySlack.length*2){
-    const n=sortedBySlack[idx2%sortedBySlack.length];
-    if(targetMap[n]<upperLimit[n]){targetMap[n]++;assigned++;}
-    idx2++;
-  }
-  // 余剰は削減
-  const sortedByExcess=names.slice().sort((a,b)=>targetMap[b]-targetMap[a]);
-  let idx3=0;
-  while(assigned>totalSlots&&idx3<sortedByExcess.length*2){
-    const n=sortedByExcess[idx3%sortedByExcess.length];
-    if(targetMap[n]>0){targetMap[n]--;assigned--;}
-    idx3++;
-  }
-
-  // --- Step3: 各公演に割り付け ---
-  // 各人の残り出演可能回数
+  // Step2: 目標回数 = min(上限, ceil(平均)) を厳守
+  const totalSlots=koens.length*minP;
+  const upper={};
+  names.forEach(n=>{upper[n]=avail[n].ok.size+avail[n].delta.size;});
+  const ceilAvg=Math.ceil(totalSlots/names.length);
+  const target={};
+  names.forEach(n=>{target[n]=Math.min(upper[n],ceilAvg);});
+  // 残り目標（これを消費したら終わり・絶対超えない）
   const remaining={};
-  names.forEach(n=>{remaining[n]=targetMap[n];});
+  names.forEach(n=>{remaining[n]=target[n];});
 
-  // 公演ごとに「この公演に出られる人」×「残り回数が多い順」で選ぶ
-  const koenAssign={}; // { koenId: [{name,isDelta}] }
-  koens.forEach(k=>{koenAssign[k.id]=[];});
-
-  // 各公演の候補者リスト（○優先）
+  // Step3: 各公演に割り付け
+  // 「出演可能公演数が少ない人（希少な人）を先に確保」
+  const koenCast={};
   koens.forEach(k=>{
-    const okHere =names.filter(n=>availability[n].ok.includes(k.id)&&remaining[n]>0);
-    const dtHere =names.filter(n=>availability[n].delta.includes(k.id)&&remaining[n]>0);
+    const okHere=names.filter(n=>avail[n].ok.has(k.id)&&remaining[n]>0);
+    const dtHere=names.filter(n=>avail[n].delta.has(k.id)&&remaining[n]>0&&!avail[n].ok.has(k.id));
 
-    // 残り回数が多い順（均等になるよう消化）
-    okHere.sort((a,b)=>remaining[b]-remaining[a]);
-    dtHere.sort((a,b)=>remaining[b]-remaining[a]);
+    // 希少順（出られる公演が少ない人を先に）、同じなら残り多い順
+    const sortFn=(a,b)=>upper[a]-upper[b]||remaining[b]-remaining[a];
+    okHere.sort(sortFn);
+    dtHere.sort(sortFn);
 
-    let slot=Math.min(maxP,Math.max(minP,okHere.length+dtHere.length));
-    let pick=[];
-    let usedDt=[];
+    const pick=[];
+    // ○を希少順に選ぶ
+    okHere.forEach(n=>{
+      if(pick.length<minP){pick.push({name:n,isDelta:false});remaining[n]--;}
+    });
+    // 足りなければ△（目標残りがある人のみ）
+    dtHere.forEach(n=>{
+      if(pick.length<minP){pick.push({name:n,isDelta:true});remaining[n]--;}
+    });
 
-    // まず○から選ぶ
-    okHere.forEach(n=>{if(pick.length<slot)pick.push({name:n,isDelta:false});});
-    // ○で minP に届かなければ△で補完
-    if(pick.length<minP){
-      dtHere.forEach(n=>{
-        if(pick.length<minP&&!pick.find(p=>p.name===n)){
-          pick.push({name:n,isDelta:true});
-          usedDt.push(n);
-        }
-      });
-    }
-
-    koenAssign[k.id]=pick;
-    // 残り回数を消費
-    pick.forEach(p=>{remaining[p.name]--;});
+    koenCast[k.id]=pick;
   });
 
-  // --- Step4: 残り回数が余った人を未充足の公演に追加 ---
-  // （目標を達成していないのに出られる公演がある場合）
+  // Step4: 目標未達の人を未充足公演に追加（目標を超えない）
   koens.forEach(k=>{
-    const cur=koenAssign[k.id];
+    const cur=koenCast[k.id];
     if(cur.length>=minP)return;
-    const need=minP-cur.length;
-    // まだ出られる人（残り>0 かつ この公演で○or△）
-    const extra=names
+    const inNames=new Set(cur.map(p=>p.name));
+    const extras=names
       .filter(n=>{
-        const alreadyIn=cur.find(p=>p.name===n);
-        const canOk=availability[n].ok.includes(k.id);
-        const canDt=availability[n].delta.includes(k.id);
-        return !alreadyIn&&(canOk||canDt);
+        if(inNames.has(n))return false;
+        if(remaining[n]<=0)return false; // 目標超えない
+        return avail[n].ok.has(k.id)||avail[n].delta.has(k.id);
       })
-      .sort((a,b)=>remaining[b]-remaining[a]);
-    extra.slice(0,need).forEach(n=>{
-      const isDelta=!availability[n].ok.includes(k.id);
-      cur.push({name:n,isDelta});
-      remaining[n]--;
+      .sort((a,b)=>upper[a]-upper[b]||remaining[b]-remaining[a]);
+    extras.forEach(n=>{
+      if(cur.length<minP){
+        const isDelta=!avail[n].ok.has(k.id);
+        cur.push({name:n,isDelta});
+        remaining[n]--;
+      }
     });
   });
 
-  // --- Step5: 出演順（前座→中堅→トリ）前回より出てない人が前座 ---
-  const totalCount={};
-  names.forEach(n=>{totalCount[n]=0;});
+  // Step5: 出演順（累計少ない順が前座）
+  const runCount={};
+  names.forEach(n=>{runCount[n]=0;});
 
   const plans=koens.map(k=>{
-    const cast=koenAssign[k.id];
-    cast.sort((a,b)=>(totalCount[a.name]||0)-(totalCount[b.name]||0));
-    cast.forEach(p=>{totalCount[p.name]=(totalCount[p.name]||0)+1;});
+    const cast=koenCast[k.id];
+    cast.sort((a,b)=>(runCount[a.name]||0)-(runCount[b.name]||0));
+    cast.forEach(p=>{runCount[p.name]=(runCount[p.name]||0)+1;});
     const ni=Math.floor(cast.length/2);
     return {
       koen:k,
       cast:cast.map((p,i)=>({
         order:i+1,
         name:p.name,
-        geishu:availability[p.name]?availability[p.name].geishu:'',
+        geishu:avail[p.name]?avail[p.name].geishu:'',
         neta:'',
         pending:p.isDelta,
         nakairiAfter:(nakairi==='middle'&&i===ni-1),
