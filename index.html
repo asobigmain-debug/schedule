@@ -8,6 +8,7 @@
 <link rel="manifest" href="manifest.json">
 <title>出演予定</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 body{font-family:'Noto Sans JP',sans-serif;background:#f0f8fc;color:#1a2e38;font-size:14px;padding-bottom:64px}
@@ -778,17 +779,94 @@ async function exportJpg(){
   const targets=D.koens.filter(k=>!k.archived&&k.date>=cutoff);
   const t=today().split('-');
   const period=months>0?t[0]+'年'+parseInt(t[1])+'月〜'+(parseInt(t[1])+months-1)+'月':'全期間';
+
+  // 描画用要素を作成
   const src=document.getElementById('jpg-src');
-  src.innerHTML='<div style="padding:24px"><div style="text-align:center;font-size:1.1rem;font-weight:700;color:#1e8fb5;padding-bottom:12px;border-bottom:2px solid #b3dff0;margin-bottom:14px">出演予定一覧　'+period+'</div>'+targets.map(k=>{
+  src.style.cssText='position:fixed;left:-9999px;top:0;width:600px;background:#fff;padding:28px;font-family:Noto Sans JP,sans-serif';
+
+  // 月グループ化
+  const byMonth={},monthOrder=[];
+  targets.forEach(k=>{
     const d=pd(k.date);
-    const lbl=(d.getMonth()+1)+'月'+d.getDate()+'日（'+DOW[d.getDay()]+'）';
+    const mk=(d.getMonth()+1)+'月';
+    if(!byMonth[mk]){byMonth[mk]=[];monthOrder.push(mk);}
+    byMonth[mk].push(k);
+  });
+
+  // 出演日まとめ
+  const personDates={};
+  targets.forEach(k=>{
+    const d=pd(k.date);
+    const dlbl=(d.getMonth()+1)+'/'+d.getDate();
     const cast=D.casts.filter(c=>c.koenId===k.id).sort((a,b)=>a.order-b.order);
-    const chips=(cast.length?cast:D.replies.filter(r=>r.koenId===k.id&&r.status==='ok').map(r=>({name:r.name}))).map(c=>'<span style="background:#e4f4fb;color:#1e6f8f;border:1px solid #b3dff0;padding:2px 9px;border-radius:10px;font-size:.75rem">'+c.name+'</span>').join(' ');
-    return '<div style="display:flex;gap:12px;align-items:flex-start;padding:8px 0;border-bottom:1px solid #f0f8fc"><div style="min-width:110px;font-weight:700;font-size:.88rem;color:#1e8fb5;flex-shrink:0">'+lbl+'<br><span style="font-size:.72rem;color:#4a6572;font-weight:400">'+k.name+(k.time?' '+k.time:'')+'</span></div><div style="display:flex;flex-wrap:wrap;gap:4px">'+(chips||'<span style="color:#aaa;font-size:.75rem">未定</span>')+'</div></div>';
-  }).join('')+'</div>';
-  src.style.cssText='position:fixed;left:0;top:0;z-index:9999;background:#fff;width:100%;overflow:auto;max-height:100vh';
-  toast('スクリーンショットで保存してください。タップで閉じます。');
-  src.onclick=()=>{src.style.cssText='position:fixed;left:-9999px;top:0;width:720px;background:#fff';};
+    const people=cast.length
+      ?cast.map(c=>({name:c.name,pending:c.pending}))
+      :D.replies.filter(r=>r.koenId===k.id&&r.status==='ok').map(r=>({name:r.name,pending:false}));
+    people.forEach(p=>{
+      if(!personDates[p.name])personDates[p.name]=[];
+      personDates[p.name].push({lbl:dlbl,pending:p.pending});
+    });
+  });
+
+  // HTML構築
+  let html=`<div style="text-align:center;font-size:18px;font-weight:700;color:#1e8fb5;
+    padding-bottom:14px;border-bottom:3px solid #b3dff0;margin-bottom:18px">
+    出演予定一覧　${period}</div>`;
+
+  // 日程一覧
+  monthOrder.forEach(mk=>{
+    html+=`<div style="font-size:15px;font-weight:700;color:#1e8fb5;
+      padding:10px 0 4px;border-bottom:2px solid #b3dff0;margin-bottom:4px">${mk}</div>`;
+    byMonth[mk].forEach(k=>{
+      const d=pd(k.date);
+      const lbl=d.getDate()+'日（'+DOW[d.getDay()]+'）';
+      const cast=D.casts.filter(c=>c.koenId===k.id).sort((a,b)=>a.order-b.order);
+      const people=cast.length
+        ?cast.map(c=>c.pending?'<span style="color:#856404">'+c.name+'⚠</span>':c.name)
+        :D.replies.filter(r=>r.koenId===k.id&&r.status==='ok').map(r=>r.name);
+      html+=`<div style="display:flex;gap:12px;padding:7px 0;border-bottom:1px solid #f0f8fc;font-size:14px">
+        <div style="min-width:90px;font-weight:700">${lbl}</div>
+        <div>${people.join('　')||'<span style="color:#aaa">未定</span>'}</div>
+      </div>`;
+    });
+  });
+
+  // 出演日まとめ
+  if(Object.keys(personDates).length){
+    html+=`<div style="margin-top:20px;padding-top:14px;border-top:3px solid #b3dff0">
+      <div style="font-size:15px;font-weight:700;color:#1e8fb5;margin-bottom:10px">出演日まとめ</div>`;
+    Object.entries(personDates).sort((a,b)=>b[1].length-a[1].length).forEach(([name,dates])=>{
+      const dateStr=dates.map(d=>d.pending
+        ?'<span style="color:#856404">'+d.lbl+'⚠</span>':d.lbl).join('・');
+      html+=`<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #f0f8fc;font-size:13px;align-items:baseline">
+        <div style="min-width:68px;font-weight:700">${name}</div>
+        <div style="flex:1">${dateStr}</div>
+        <div style="color:#1e8fb5;font-weight:700;white-space:nowrap">（${dates.length}回）</div>
+      </div>`;
+    });
+    html+='</div>';
+  }
+
+  src.innerHTML=html;
+
+  // html2canvasでJPG生成
+  toast('画像を生成中…');
+  try {
+    await new Promise(r=>setTimeout(r,300)); // レンダリング待ち
+    const canvas=await html2canvas(src,{
+      scale:2,
+      backgroundColor:'#ffffff',
+      useCORS:true,
+      logging:false,
+    });
+    const link=document.createElement('a');
+    link.download='出演予定_'+today()+'.jpg';
+    link.href=canvas.toDataURL('image/jpeg',0.95);
+    link.click();
+    toast('JPGを保存しました ✓');
+  } catch(e) {
+    toast('保存エラー: '+e.message);
+  }
 }
 
 function applyConfig(){
