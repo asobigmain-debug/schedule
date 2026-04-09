@@ -460,8 +460,7 @@ function loadPlan(){
   document.getElementById('plan-save').style.display='block';
 }
 
-// ===== 全期間一括割り付け =====
-// countMap: { name: 今期間の出演確定回数 } を管理しながら全公演を順番に処理
+// ===== 全期間一括割り付け（均等回数優先） =====
 function generateAllPlans(){
   const cfg=D.config||{};
   const minP=parseInt(cfg.minP)||3;
@@ -469,82 +468,134 @@ function generateAllPlans(){
   const gm=cfg.geishuMode||'equal';
   const nakairi=cfg.nakairi||'middle';
 
-  // 期間内のアーカイブ済みでない公演
   const koens=D.koens.filter(k=>!k.archived);
   if(!koens.length){toast('対象の公演がありません');return null;}
 
-  // 今期間の出演カウント（○で既に保存済みのものを初期値に）
-  const countMap={};
-  // 全員初期化
+  // 全出演者の○△回数を先に集計（能力の上限として使う）
+  const canOk={};   // ○で出られる公演数
+  const canDt={};   // △で出られる公演数
   const allNames=new Set(D.replies.map(r=>r.name));
+  allNames.forEach(n=>{canOk[n]=0;canDt[n]=0;});
+  koens.forEach(k=>{
+    D.replies.filter(r=>r.koenId===k.id).forEach(r=>{
+      if(r.status==='ok')  canOk[r.name]=(canOk[r.name]||0)+1;
+      if(r.status==='delta')canDt[r.name]=(canDt[r.name]||0)+1;
+    });
+  });
+
+  // 合計出演可能回数（○+△）
+  const canTotal={};
+  allNames.forEach(n=>{canTotal[n]=(canOk[n]||0)+(canDt[n]||0);});
+
+  // 目標：総出演枠 ÷ 人数 で均等配分を目指す
+  const totalSlots=koens.reduce((s,k)=>s+minP,0); // 最低人数×公演数
+  const nameList=Array.from(allNames).filter(n=>canTotal[n]>0);
+  const avgTarget=nameList.length>0?Math.round(totalSlots/nameList.length):minP;
+
+  // 実際の出演カウント
+  const countMap={};
   allNames.forEach(n=>{countMap[n]=0;});
 
   const plans=[];
 
   koens.forEach(function(koen){
-    // この公演の回答
-    const okReps  =D.replies.filter(r=>r.koenId===koen.id&&r.status==='ok');
-    const dtReps  =D.replies.filter(r=>r.koenId===koen.id&&r.status==='delta');
-    // × は絶対除外
+    const okReps=D.replies.filter(r=>r.koenId===koen.id&&r.status==='ok');
+    const dtReps=D.replies.filter(r=>r.koenId===koen.id&&r.status==='delta');
+    // × は絶対除外（okReps・dtReps以外は選ばない）
 
-    // ○を出演回数が少ない順にソート
-    let okPool=okReps.slice().sort((a,b)=>(countMap[a.name]||0)-(countMap[b.name]||0));
+    const available=[
+      ...okReps.map(r=>({...r,isDelta:false})),
+      ...dtReps.map(r=>({...r,isDelta:true}))
+    ];
 
-    const cnt=Math.min(maxP,Math.max(minP,okPool.length+dtReps.length));
+    if(!available.length){
+      plans.push({koen,cast:[],countMap:{...countMap}});
+      return;
+    }
+
+    // 均等優先ソート：
+    // 1. まだ目標回数に達していない人を優先
+    // 2. 現在の出演回数が少ない順
+    // 3. ○を△より優先
+    available.sort((a,b)=>{
+      const ac=countMap[a.name]||0;
+      const bc=countMap[b.name]||0;
+      const aUnder=ac<avgTarget?0:1;
+      const bUnder=bc<avgTarget?0:1;
+      if(aUnder!==bUnder)return aUnder-bUnder; // 目標未達優先
+      if(ac!==bc)return ac-bc;                  // 回数少ない順
+      if(!a.isDelta&&b.isDelta)return -1;        // ○を△より先
+      if(a.isDelta&&!b.isDelta)return 1;
+      return 0;
+    });
+
+    // 人数決定：○の人数に合わせる（最小minP、最大maxP）
+    const okCount=okReps.length;
+    const cnt=Math.min(maxP,Math.max(minP,Math.min(available.length,
+      okCount>=minP?okCount:okCount+Math.min(dtReps.length,minP-okCount)
+    )));
+
+    // 芸種バランスを考慮して選出
     let cast=[];
-    let usedDelta=[];
+    const usedDelta=[];
 
-    // 芸種バランスを考慮して○から選ぶ
     if(gm==='equal'){
+      // まず○だけで芸種均等に
+      const okSorted=available.filter(p=>!p.isDelta);
+      const dtSorted=available.filter(p=>p.isDelta);
       const byG={};
-      okPool.forEach(p=>{const g=p.geishu||'その他';(byG[g]=byG[g]||[]).push(p);});
+      okSorted.forEach(p=>{const g=p.geishu||'その他';(byG[g]=byG[g]||[]).push(p);});
       const keys=Object.keys(byG);
       let ki=0;
-      while(cast.length<Math.min(cnt,okPool.length)&&ki<cnt+5){
-        for(let i=0;i<keys.length&&cast.length<Math.min(cnt,okPool.length);i++){
+      const okTarget=Math.min(cnt,okSorted.length);
+      while(cast.length<okTarget&&ki<okTarget+5){
+        for(let i=0;i<keys.length&&cast.length<okTarget;i++){
           const a=(byG[keys[(ki+i)%keys.length]]||[]).filter(p=>!cast.includes(p));
           if(a.length)cast.push(a[0]);
         }
         ki++;
       }
-      okPool.forEach(p=>{if(cast.length<Math.min(cnt,okPool.length)&&!cast.includes(p))cast.push(p);});
+      okSorted.forEach(p=>{if(cast.length<okTarget&&!cast.includes(p))cast.push(p);});
+      // ○で足りなければ△を追加
+      if(cast.length<minP){
+        dtSorted.forEach(p=>{
+          if(cast.length<minP){cast.push(p);usedDelta.push(p.name);}
+        });
+      }
     }else if(gm==='kodan'){
-      const ko=okPool.filter(p=>p.geishu==='講談');
-      const ot=okPool.filter(p=>p.geishu!=='講談');
-      cast=[...ko,...ot].slice(0,Math.min(cnt,okPool.length));
+      const ok_k=available.filter(p=>!p.isDelta&&p.geishu==='講談');
+      const ok_o=available.filter(p=>!p.isDelta&&p.geishu!=='講談');
+      const dt_a=available.filter(p=>p.isDelta);
+      cast=[...ok_k,...ok_o].slice(0,cnt);
+      if(cast.length<minP){
+        dt_a.forEach(p=>{if(cast.length<minP){cast.push(p);usedDelta.push(p.name);}});
+      }
     }else{
-      cast=okPool.slice(0,Math.min(cnt,okPool.length));
+      const okOnly=available.filter(p=>!p.isDelta).slice(0,cnt);
+      cast=[...okOnly];
+      if(cast.length<minP){
+        available.filter(p=>p.isDelta).forEach(p=>{
+          if(cast.length<minP){cast.push(p);usedDelta.push(p.name);}
+        });
+      }
     }
 
-    // ○だけで人数が足りない場合、△を追加（要確認）
-    if(cast.length<minP&&dtReps.length>0){
-      const need=minP-cast.length;
-      const dtSorted=dtReps.slice().sort((a,b)=>(countMap[a.name]||0)-(countMap[b.name]||0));
-      dtSorted.slice(0,need).forEach(p=>{cast.push(p);usedDelta.push(p.name);});
-    }
-
-    // 出演順：回数少ない順（前座→中堅→トリ）
+    // 出演順ソート（回数少ない順が前座→トリ）
     cast.sort((a,b)=>(countMap[a.name]||0)-(countMap[b.name]||0));
 
-    // カウント更新（○確定のみカウント、△は暫定）
-    cast.forEach(p=>{
-      if(!usedDelta.includes(p.name)){
-        countMap[p.name]=(countMap[p.name]||0)+1;
-      }
-    });
+    // カウント更新（○も△も今回の出演としてカウント）
+    cast.forEach(p=>{countMap[p.name]=(countMap[p.name]||0)+1;});
 
-    // 仲入り位置
     const ni=Math.floor(cast.length/2);
-
     plans.push({
-      koen:koen,
+      koen,
       cast:cast.map((p,i)=>({
         order:i+1,
         name:p.name,
         geishu:p.geishu||'',
         neta:'',
-        pending:usedDelta.includes(p.name), // △要確認フラグ
-        nakairiAfter:(nakairi==='middle'&&i===ni-1), // 仲入りタイミング
+        pending:usedDelta.includes(p.name),
+        nakairiAfter:(nakairi==='middle'&&i===ni-1),
       })),
       countMap:{...countMap},
     });
